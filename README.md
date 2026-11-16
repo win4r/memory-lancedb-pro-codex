@@ -1,3 +1,5 @@
+# [🚀观看我的哔哩哔哩视频](https://space.bilibili.com/3493277319825652)
+
 # memory-lancedb-pro-codex
 
 Codex adaptation of [`memory-lancedb-pro`](https://github.com/win4r/memory-lancedb-pro).
