@@ -1953,6 +1953,70 @@ const memoryLanceDBProPlugin = {
     );
     api.logger.info(`memory-lancedb-pro: diagnostic build tag loaded (${DIAG_BUILD_TAG})`);
 
+    const memoryRuntime = {
+      resolveMemoryBackendConfig: () => ({
+        backend: "lancedb-pro",
+        citations: false,
+        lancedbPro: { dbPath: resolvedDbPath },
+      }),
+      getMemorySearchManager: async () => ({
+        manager: {
+          async search(query: string, opts?: { maxResults?: number; limit?: number }) {
+            const limit = Math.max(1, Math.min(20, Number(opts?.maxResults ?? opts?.limit ?? 5) || 5));
+            const results = await retriever.retrieve({ query, limit } as any);
+            return results.map((r) => ({
+              path: `memory://${r.entry.id}`,
+              title: `[${r.entry.category}:${r.entry.scope}] ${r.entry.text.slice(0, 80)}`,
+              snippet: r.entry.text,
+              score: r.score,
+              metadata: {
+                id: r.entry.id,
+                category: r.entry.category,
+                scope: r.entry.scope,
+                importance: r.entry.importance,
+                timestamp: r.entry.timestamp,
+              },
+            }));
+          },
+          async probeVectorAvailability() {
+            const result = await retriever.test();
+            return result.success;
+          },
+          async probeEmbeddingAvailability() {
+            const result = await embedder.test();
+            return { ok: result.success, error: result.success ? undefined : result.error };
+          },
+          status() {
+            return {
+              backend: "lancedb-pro",
+              provider: config.embedding.provider,
+              requestedProvider: config.embedding.provider,
+              model: config.embedding.model || "text-embedding-3-small",
+              files: 0,
+              chunks: 0,
+              dirty: false,
+              workspaceDir: getDefaultWorkspaceDir(),
+              dbPath: resolvedDbPath,
+              sources: ["lancedb-pro"],
+              sourceCounts: {},
+              vector: { enabled: true, available: true },
+              batch: { enabled: false, failures: 0, limit: 0, wait: false, concurrency: 0, pollIntervalMs: 0, timeoutMs: 0 },
+              custom: { lancedbPro: { mode: config.retrieval.mode || "hybrid", fts: true } },
+            };
+          },
+          async close() {},
+        },
+      }),
+      async closeAllMemorySearchManagers() {},
+    };
+
+    (api as any).registerMemoryRuntime?.(memoryRuntime);
+    (api as any).registerMemoryCapability?.({
+      id: "memory-lancedb-pro",
+      name: "Memory LanceDB Pro",
+      backend: "lancedb-pro",
+    });
+
     api.on("message_received", (event, ctx) => {
       const conversationKey = buildAutoCaptureConversationKeyFromIngress(
         ctx.channelId,
@@ -2067,10 +2131,10 @@ const memoryLanceDBProPlugin = {
     // Lifecycle Hooks
     // ========================================================================
 
-    // Auto-recall: inject relevant memories before agent starts
+    // Auto-recall: inject relevant memories before prompt build
     // Default is OFF to prevent the model from accidentally echoing injected context.
     if (config.autoRecall === true) {
-      api.on("before_agent_start", async (event, ctx) => {
+      api.on("before_prompt_build", async (event, ctx) => {
         if (
           !event.prompt ||
           shouldSkipRetrieval(event.prompt, config.autoRecallMinLength)
@@ -2644,7 +2708,7 @@ const memoryLanceDBProPlugin = {
         }
       }, { priority: 15 });
 
-      api.on("before_agent_start", async (_event, ctx) => {
+      api.on("before_prompt_build", async (_event, ctx) => {
         const sessionKey = typeof ctx.sessionKey === "string" ? ctx.sessionKey : "";
         if (isInternalReflectionSessionKey(sessionKey)) return;
         if (reflectionInjectMode !== "inheritance-only" && reflectionInjectMode !== "inheritance+derived") return;
@@ -2996,7 +3060,7 @@ const memoryLanceDBProPlugin = {
         name: "memory-lancedb-pro.memory-reflection.command-reset",
         description: "Generate reflection log before /reset",
       });
-      api.logger.info("memory-reflection: integrated hooks registered (command:new, command:reset, after_tool_call, before_agent_start, before_prompt_build)");
+      api.logger.info("memory-reflection: integrated hooks registered (command:new, command:reset, after_tool_call, before_prompt_build)");
     }
 
     if (config.sessionStrategy === "systemSessionMemory") {
@@ -3129,9 +3193,7 @@ const memoryLanceDBProPlugin = {
 
     async function runBackup() {
       try {
-        const backupDir = api.resolvePath(
-          join(resolvedDbPath, "..", "backups"),
-        );
+        const backupDir = join(dirname(resolvedDbPath), "backups");
         await mkdir(backupDir, { recursive: true });
 
         const allMemories = await store.list(undefined, undefined, 10000, 0);
@@ -3213,7 +3275,7 @@ const memoryLanceDBProPlugin = {
             );
             const retrievalTest = await withTimeout(
               retriever.test(),
-              8_000,
+              20_000,
               "retriever.test()",
             );
 
