@@ -23,6 +23,7 @@ import { registerAllMemoryTools } from "./src/tools.js";
 import { appendSelfImprovementEntry, ensureSelfImprovementLearningFiles } from "./src/self-improvement-files.js";
 import type { MdMirrorWriter } from "./src/tools.js";
 import { shouldSkipRetrieval } from "./src/adaptive-retrieval.js";
+import { parseClawteamScopes, applyClawteamScopes } from "./src/clawteam-scope.js";
 import { runWithReflectionTransientRetryOnce } from "./src/reflection-retry.js";
 import { resolveReflectionSessionSearchDirs, stripResetSuffix } from "./src/session-recovery.js";
 import {
@@ -38,6 +39,13 @@ import { createReflectionEventId } from "./src/reflection-event-store.js";
 import { buildReflectionMappedMetadata } from "./src/reflection-mapped-metadata.js";
 import { createMemoryCLI } from "./cli.js";
 import { isNoise } from "./src/noise-filter.js";
+import {
+  DEFAULT_DREAMING_CONFIG,
+  getDreamingScheduleSlot,
+  parseDreamingConfig,
+  writeDreamingArtifacts,
+  type DreamingConfig,
+} from "./src/dreaming.js";
 
 // Import smart extraction & lifecycle components
 import { SmartExtractor } from "./src/smart-extractor.js";
@@ -135,6 +143,7 @@ interface PluginConfig {
   extractMinMessages?: number;
   extractMaxChars?: number;
   admissionControl?: AdmissionControlConfig;
+  dreaming?: DreamingConfig;
   scopes?: {
     default?: string;
     definitions?: Record<string, { description: string }>;
@@ -1689,6 +1698,11 @@ const memoryLanceDBProPlugin = {
       { decayEngine },
     );
     const scopeManager = createScopeManager(config.scopes);
+    const clawteamScopes = parseClawteamScopes(process.env.CLAWTEAM_MEMORY_SCOPE);
+    if (clawteamScopes.length > 0) {
+      applyClawteamScopes(scopeManager, clawteamScopes);
+      api.logger.info(`memory-lancedb-pro: CLAWTEAM_MEMORY_SCOPE added scopes: ${clawteamScopes.join(", ")}`);
+    }
     const migrator = createMigrator(store);
 
     // Initialize smart extraction
@@ -1736,7 +1750,7 @@ const memoryLanceDBProPlugin = {
           noiseBank,
         });
 
-        api.logger.info("memory-lancedb-pro: smart extraction enabled (LLM model: " + llmModel + ", noise bank: ON)");
+        if (process.env.OPENCLAW_SUPPRESS_PLUGIN_STARTUP_INFO !== "1") api.logger.info("memory-lancedb-pro: smart extraction enabled (LLM model: " + llmModel + ", noise bank: ON)");
       } catch (err) {
         api.logger.warn(`memory-lancedb-pro: smart extraction init failed, falling back to regex: ${String(err)}`);
       }
@@ -1841,6 +1855,42 @@ const memoryLanceDBProPlugin = {
 
       return tierOverrides;
     }
+    async function collectDreamingMemories(maxTotal = 600): Promise<Array<Awaited<ReturnType<typeof store.list>>[number]>> {
+      const batchSize = 200;
+      const entries: Array<Awaited<ReturnType<typeof store.list>>[number]> = [];
+
+      for (let offset = 0; entries.length < maxTotal; offset += batchSize) {
+        const page = await store.list(undefined, undefined, batchSize, offset);
+        if (page.length === 0) break;
+        entries.push(...page);
+        if (page.length < batchSize) break;
+      }
+
+      return entries.slice(0, maxTotal);
+    }
+
+    async function runDreamingSweep(workspaceDir: string, reason: string): Promise<void> {
+      const dreamingConfig = config.dreaming ?? DEFAULT_DREAMING_CONFIG;
+      if (!dreamingConfig.enabled) return;
+
+      try {
+        const memories = await collectDreamingMemories();
+        const result = await writeDreamingArtifacts({
+          workspaceDir: workspaceDir || getDefaultWorkspaceDir(api.config),
+          memories,
+          config: dreamingConfig,
+        });
+
+        if (dreamingConfig.verboseLogging) {
+          api.logger.info(
+            `memory-lancedb-pro: dreaming sweep completed (${reason}; short-term=${result.shortTermCount}, promoted=${result.promotedCount}, lightHits=${result.lightSignalCount}, remHits=${result.remSignalCount})`,
+          );
+        }
+      } catch (err) {
+        api.logger.warn(`memory-lancedb-pro: dreaming sweep failed (${reason}): ${String(err)}`);
+      }
+    }
+
     const reflectionErrorStateBySession = new Map<string, ReflectionErrorState>();
     const reflectionDerivedBySession = new Map<string, { updatedAt: number; derived: string[] }>();
     const reflectionByAgentCache = new Map<string, { updatedAt: number; invariants: string[]; derived: string[] }>();
@@ -1948,10 +1998,10 @@ const memoryLanceDBProPlugin = {
     // Wire up the module-level debug logger for pure helper functions.
     _autoCaptureDebugLog = (msg: string) => api.logger.debug(msg);
 
-    api.logger.info(
+    if (process.env.OPENCLAW_SUPPRESS_PLUGIN_STARTUP_INFO !== "1") api.logger.info(
       `memory-lancedb-pro@${pluginVersion}: plugin registered (db: ${resolvedDbPath}, model: ${config.embedding.model || "text-embedding-3-small"}, smartExtraction: ${smartExtractor ? 'ON' : 'OFF'})`
     );
-    api.logger.info(`memory-lancedb-pro: diagnostic build tag loaded (${DIAG_BUILD_TAG})`);
+    if (process.env.OPENCLAW_SUPPRESS_PLUGIN_STARTUP_INFO !== "1") api.logger.info(`memory-lancedb-pro: diagnostic build tag loaded (${DIAG_BUILD_TAG})`);
 
     api.on("message_received", (event, ctx) => {
       const conversationKey = buildAutoCaptureConversationKeyFromIngress(
@@ -2573,7 +2623,7 @@ const memoryLanceDBProPlugin = {
         });
       }
 
-      api.logger.info("self-improvement: integrated hooks registered (agent:bootstrap, command:new, command:reset)");
+      if (process.env.OPENCLAW_SUPPRESS_PLUGIN_STARTUP_INFO !== "1") api.logger.info("self-improvement: integrated hooks registered (agent:bootstrap, command:new, command:reset)");
     }
 
     // ========================================================================
@@ -2976,6 +3026,7 @@ const memoryLanceDBProPlugin = {
           const dailyPath = join(workspaceDir, "memory", `${dateStr}.md`);
           await ensureDailyLogFile(dailyPath, dateStr);
           await appendFile(dailyPath, `- [${timeHms} UTC] Reflection generated: \`${relPath}\`\n`, "utf-8");
+          await runDreamingSweep(workspaceDir, `reflection:${String(event.action || "unknown")}`);
 
           api.logger.info(`memory-reflection: wrote ${relPath} for session ${currentSessionId}`);
         } catch (err) {
@@ -3117,7 +3168,7 @@ const memoryLanceDBProPlugin = {
       api.logger.info("session-memory: hook registered for command:new as memory-lancedb-pro-session-memory");
     }
     if (config.sessionStrategy === "none") {
-      api.logger.info("session-strategy: using none (plugin memory-reflection hooks disabled)");
+      if (process.env.OPENCLAW_SUPPRESS_PLUGIN_STARTUP_INFO !== "1") api.logger.info("session-strategy: using none (plugin memory-reflection hooks disabled)");
     }
 
     // ========================================================================
@@ -3172,6 +3223,9 @@ const memoryLanceDBProPlugin = {
         api.logger.warn(`memory-lancedb-pro: backup failed: ${String(err)}`);
       }
     }
+
+    let dreamingTimer: ReturnType<typeof setInterval> | null = null;
+    let lastDreamingScheduleSlot: string | null = null;
 
     // ========================================================================
     // Service Registration
@@ -3245,6 +3299,21 @@ const memoryLanceDBProPlugin = {
         // Fire-and-forget: allow gateway to start serving immediately.
         setTimeout(() => void runStartupChecks(), 0);
 
+        if (config.dreaming?.enabled) {
+          const serviceWorkspaceDir = getDefaultWorkspaceDir(api.config);
+          setTimeout(() => void runDreamingSweep(serviceWorkspaceDir, "startup"), 10_000);
+          dreamingTimer = setInterval(() => {
+            const slot = getDreamingScheduleSlot(
+              Date.now(),
+              config.dreaming?.frequency ?? DEFAULT_DREAMING_CONFIG.frequency,
+              config.dreaming?.timezone,
+            );
+            if (!slot || slot === lastDreamingScheduleSlot) return;
+            lastDreamingScheduleSlot = slot;
+            void runDreamingSweep(serviceWorkspaceDir, `scheduled:${slot}`);
+          }, 60_000);
+        }
+
         // Check for legacy memories that could be upgraded
         setTimeout(async () => {
           try {
@@ -3269,6 +3338,10 @@ const memoryLanceDBProPlugin = {
         if (backupTimer) {
           clearInterval(backupTimer);
           backupTimer = null;
+        }
+        if (dreamingTimer) {
+          clearInterval(dreamingTimer);
+          dreamingTimer = null;
         }
         api.logger.info("memory-lancedb-pro: stopped");
       },
@@ -3323,6 +3396,9 @@ export function parsePluginConfig(value: unknown): PluginConfig {
   const legacySessionMemoryEnabled = typeof sessionMemoryRaw?.enabled === "boolean"
     ? sessionMemoryRaw.enabled
     : undefined;
+  const dreamingRaw = typeof cfg.dreaming === "object" && cfg.dreaming !== null
+    ? cfg.dreaming as Record<string, unknown>
+    : null;
   const sessionStrategy: SessionStrategy =
     sessionStrategyRaw === "systemSessionMemory" || sessionStrategyRaw === "memoryReflection" || sessionStrategyRaw === "none"
       ? sessionStrategyRaw
@@ -3387,6 +3463,7 @@ export function parsePluginConfig(value: unknown): PluginConfig {
     extractMinMessages: parsePositiveInt(cfg.extractMinMessages) ?? 2,
     extractMaxChars: parsePositiveInt(cfg.extractMaxChars) ?? 8000,
     admissionControl: normalizeAdmissionControlConfig(cfg.admissionControl),
+    dreaming: parseDreamingConfig(dreamingRaw),
     scopes: typeof cfg.scopes === "object" && cfg.scopes !== null ? cfg.scopes as any : undefined,
     enableManagementTools: cfg.enableManagementTools === true,
     sessionStrategy,

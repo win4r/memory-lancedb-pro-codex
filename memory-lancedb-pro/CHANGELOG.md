@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.1.0-beta.11 (Status Logging Noise Reduction)
+
+This is a **beta** release published under the npm dist-tag **`beta`** (it does not affect the stable `latest` channel).
+
+Highlights:
+- **Fix**: suppress non-essential startup info logs during OpenClaw status compatibility scans
+- **Fix**: keep `openclaw status --all` output clean while preserving normal plugin loading behavior
+- **Fix**: guard startup chatter behind `OPENCLAW_SUPPRESS_PLUGIN_STARTUP_INFO` for status-oriented scan paths
+
+Notes:
+- This beta focuses on output hygiene only; it does not change memory indexing, retrieval, smart extraction behavior, or runtime storage logic
+
+---
+
+## 1.1.0-beta.10 (Dreaming Compatibility Sync)
+
+This is a **beta** release published under the npm dist-tag **`beta`** (it does not affect the stable `latest` channel).
+
+Highlights:
+- **Feat**: add Dreaming compatibility module for short-term recall promotion, phase signals, and dream diary outputs
+- **Feat**: parse `dreaming` plugin config with defaults, cron frequency, timezone, storage mode, and phase thresholds
+- **Feat**: trigger dreaming sweeps on startup, scheduled cron slots, and after memory-reflection writes
+- **Feat**: expose `dreaming` config schema in `openclaw.plugin.json` for runtime validation and config tooling
+
+Notes:
+- This codex release ports the minimal Dreaming runtime path first, without yet syncing every standalone repo UI/documentation detail
+
+---
+
+## 1.1.0-beta.9 (Codex Sync: scopes, boundary, OAuth)
+
+This is a **beta** release published under the npm dist-tag **`beta`** (it does not affect the stable `latest` channel).
+
+Highlights:
+- **Fix**: align session-key parsing and reserved bypass handling in the scope manager
+- **Feat**: add USER.md boundary filtering for recall/store and smart-extractor canonical fact routing
+- **Feat**: add atomic brand-item preference slot guards to avoid incorrect preference merges
+- **Feat**: add OAuth-backed smart-extraction LLM client support alongside the existing api-key path
+- **Feat**: add `CLAWTEAM_MEMORY_SCOPE` expansion support for team/shared scope access
+
+Notes:
+- This codex beta sync intentionally ports focused runtime capabilities first, without pulling in the full standalone release train all at once
+
+---
+
 ## 1.1.0-beta.2 (Smart Memory Beta + Access Reinforcement)
 
 This is a **beta** release published under the npm dist-tag **`beta`** (it does not affect the stable `latest` channel).
